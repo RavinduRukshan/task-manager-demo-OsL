@@ -1,9 +1,7 @@
 'use client';
 
 // ─── Library Adapter ──────────────────────────────────────────────────────────
-// Uses offline-sync-lite for offline persistence and operation queueing.
-// Online CRUD still uses direct fetch() because the library's own syncNow()
-// has a known bug (missing await on createSyncEngine) documented in README.
+// Uses offline-sync-lite for offline persistence, operation queueing, and sync.
 
 import { createSyncClient } from 'offline-sync-lite';
 import { generateRunId, loadLogs, saveLogs, nextId } from '../syncLogger';
@@ -182,11 +180,8 @@ function client() {
   return _client;
 }
 
-// ─── Queue flush helpers ──────────────────────────────────────────────────────
-// The library's syncNow() has a known bug (missing await on createSyncEngine,
-// see README). We work around it by reading the library's IndexedDB ops store
-// directly, pushing each pending op to the backend via the batch endpoint, and
-// deleting successfully-processed ops from the queue ourselves.
+// ─── Queue helpers ──────────────────────────────────────────────────────
+// Used only for tracking metrics in the UI dashboard
 
 const _IDB_NAME = 'offline-sync-lite';
 
@@ -217,18 +212,6 @@ function _readOpsFromIDB(db) {
   });
 }
 
-function _deleteOpFromIDB(db, key) {
-  return new Promise((resolve, reject) => {
-    try {
-      const tx    = db.transaction('ops', 'readwrite');
-      const store = tx.objectStore('ops');
-      const req   = store.delete(key);
-      req.onsuccess = () => resolve(true);
-      req.onerror   = () => reject(req.error);
-    } catch (err) { reject(err); }
-  });
-}
-
 async function _getQueuedOpsCount() {
   try {
     const db = await _openLibraryDB();
@@ -240,125 +223,26 @@ async function _getQueuedOpsCount() {
   }
 }
 
-// Read all pending ops for 'tasks' from the library's IDB queue, send them
-// to the backend via POST /api/tasks/batch, then remove each successful op.
-async function _flushQueuedOps() {
-  let pushedOps = 0;
-  let failedOps = 0;
-  try {
-    const db = await _openLibraryDB();
-    if (!db) return { pushedOps, failedOps };
-
-    const allOps  = await _readOpsFromIDB(db);
-    const taskOps = allOps.filter(op => op.resourceName === 'tasks');
-    if (taskOps.length === 0) return { pushedOps, failedOps };
-
-    // Build batch payload in the shape the backend expects
-    const batchPayload = taskOps.map(op => ({
-      type:    op.type,
-      id:      op.id,
-      payload: op.payload,
-    }));
-
-    let results = [];
-    try {
-      const resp = await _api('/api/tasks/batch', {
-        method: 'POST',
-        body:   JSON.stringify({ operations: batchPayload }),
-      });
-      results = resp.results || [];
-    } catch (err) {
-      _addEvent('error', `Batch push failed: ${err.message}`);
-      return { pushedOps: 0, failedOps: taskOps.length };
-    }
-
-    for (let i = 0; i < taskOps.length; i++) {
-      const op     = taskOps[i];
-      const result = results[i];
-      if (result?.success) {
-        await _deleteOpFromIDB(db, op.key);
-        if (result.record) {
-          // Replace or add the server-confirmed record in the in-memory cache
-          _latestRecords = [
-            ..._latestRecords.filter(r => r.id !== op.id),
-            result.record,
-          ];
-        }
-        pushedOps++;
-      } else {
-        failedOps++;
-        _addEvent('error',
-          `Queued op failed (${op.type} ${op.id}): ${result?.error || 'unknown'}`);
-      }
-    }
-  } catch (err) {
-    _addEvent('error', `Queue flush error: ${err.message}`);
-  }
-  return { pushedOps, failedOps };
-}
-
-// ─── Direct API helper ────────────────────────────────────────────────────────
-// All server communication uses direct fetch() calls because the library's
-// syncNow() is broken (see README for the identified bug). The library is still
-// used for offline persistence and operation queueing.
-
-async function _api(path, options = {}) {
-  _cycleHttpReqCount++;
-  if (options.body) _cyclePayloadSentBytes += options.body.length;
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  const body = await res.json().catch(() => ({ error: res.statusText }));
-  if (!res.ok) {
-    const err = new Error(body.error || `HTTP ${res.status}`);
-    err.status = res.status;
-    err.body = body;
-    throw err;
-  }
-  return body;
-}
-
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
 async function create(task) {
   const { id, ...fields } = task;
-  const offline = typeof window !== 'undefined' && !navigator.onLine;
-  if (offline) {
-    _userOpsInScenario++;
-    _addEvent({ type: 'op_success', detail: `Queued create task ${id} (offline)`, task_id: id });
-    return client().create({ id, data: fields });
-  }
-  const record = await _api('/api/tasks', {
-    method: 'POST',
-    body: JSON.stringify({ id, ...fields }),
-  });
-  _latestRecords = [..._latestRecords, record];
+  const sdk = client();
   _userOpsInScenario++;
-  _addEvent({ type: 'op_success', detail: `Created task ${record.id}`, task_id: record.id });
+  const record = await sdk.create({ id, data: fields });
+  _addEvent({ type: 'op_success', detail: `Created/Queued task ${record.id}`, task_id: record.id });
   return record;
 }
 
 async function update(id, patch) {
-  const existing = _latestRecords.find(t => t.id === id);
-  const offline = typeof window !== 'undefined' && !navigator.onLine;
-  if (offline) {
-    _userOpsInScenario++;
-    _addEvent({ type: 'op_success', detail: `Queued update task ${id} (offline)`, task_id: id });
-    return client().update(id, patch);
-  }
+  const sdk = client();
+  _userOpsInScenario++;
   try {
-    const record = await _api(`/api/tasks/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ patch, updatedAt: existing?.updatedAt }),
-    });
-    _latestRecords = _latestRecords.map(t => t.id === id ? record : t);
-    _userOpsInScenario++;
-    _addEvent({ type: 'op_success', detail: `Updated task ${id}`, task_id: id });
-    _notifyAll();
+    const record = await sdk.update(id, patch);
+    _addEvent({ type: 'op_success', detail: `Updated/Queued task ${id}`, task_id: id });
     return record;
   } catch (err) {
-    if (err.status === 409) {
+    if (err.status === 409 || err.message?.includes('conflict')) {
       _conflictsDetected++;
       _runConflicts++;
       _addEvent({ type: 'conflict', detail: `Conflict on task ${id}`, task_id: id, severity: 'warn' });
@@ -368,32 +252,23 @@ async function update(id, patch) {
 }
 
 async function remove(id) {
-  const offline = typeof window !== 'undefined' && !navigator.onLine;
-  if (offline) {
-    _userOpsInScenario++;
-    _addEvent({ type: 'op_success', detail: `Queued delete task ${id} (offline)`, task_id: id });
-    await client().remove(id);
-    return { ok: true };
-  }
-  await _api(`/api/tasks/${id}`, { method: 'DELETE' });
-  _latestRecords = _latestRecords.filter(t => t.id !== id);
+  const sdk = client();
   _userOpsInScenario++;
-  _addEvent({ type: 'op_success', detail: `Deleted task ${id}`, task_id: id });
-  _notifyAll();
+  await sdk.remove(id);
+  _addEvent({ type: 'op_success', detail: `Deleted/Queued task ${id}`, task_id: id });
   return { ok: true };
 }
 
 async function get(id) {
-  const cached = _latestRecords.find(t => t.id === id);
-  if (cached) return cached;
-  return _api(`/api/tasks/${id}`);
+  return client().get(id);
 }
 
 async function list() {
-  client(); // ensure library is initialized for offline support
+  const sdk = client();
   const start = Date.now();
   try {
-    const { records } = await _api('/api/tasks');
+    _cycleHttpReqCount++;
+    const records = await sdk.list();
     const durationMs = Date.now() - start;
     _latestRecords = records || [];
     _syncSuccessCount++;
@@ -404,12 +279,6 @@ async function list() {
     _syncFailCount++;
     _retryCount++;
     _addEvent({ type: 'sync_error', detail: `List failed: ${err.message}`, severity: 'error' });
-    // Offline fallback: return library's IndexedDB records
-    const sdk = client();
-    if (sdk) {
-      const local = await sdk.list().catch(() => []);
-      _latestRecords = local;
-    }
     return _latestRecords;
   }
 }
@@ -440,18 +309,15 @@ async function syncNow(trigger = 'auto') {
   _addEvent({ type: 'sync_start', detail: `Sync triggered (${trigger})` });
 
   try {
-    // Phase 1 — push: flush any ops queued while offline to the backend.
-    const { pushedOps, failedOps } = await _flushQueuedOps();
-    if (pushedOps > 0) {
-      _addEvent({ type: 'sync_done', detail: `Pushed ${pushedOps} queued op${pushedOps === 1 ? '' : 's'} to server` });
-    }
-
-    // Phase 2 — pull: fetch the authoritative record list from the server.
-    const { records }    = await _api('/api/tasks');
+    _cycleHttpReqCount++;
+    // Call the SDK's syncNow
+    await client().syncNow();
+    
+    // Refresh local cache via SDK
+    const nextRecords    = await client().list();
     const cycleEndTs     = new Date().toISOString();
     const durationMs     = Date.now() - start;
     const onlineAfter    = typeof navigator !== 'undefined' ? navigator.onLine : true;
-    const nextRecords    = records || [];
     const appliedUpdates = _countAppliedUpdates(beforeRecords, nextRecords);
     _latestRecords = nextRecords;
     _syncSuccessCount++;
@@ -459,6 +325,11 @@ async function syncNow(trigger = 'auto') {
     _latencySamples = [..._latencySamples, durationMs].slice(-20);
     _runLatencies.push(durationMs);
     const queueAfter     = await _getQueuedOpsCount();
+    
+    // Estimate pushed ops based on queue depth change (rough metric for UI)
+    const pushedOps = Math.max(0, queueBefore - queueAfter);
+    const failedOps = 0;
+
     const cyclePayloadKB = Math.round((_cyclePayloadSentBytes / 1024) * 100) / 100;
     _runTotalHttpReqs  += _cycleHttpReqCount;
     _runTotalPayloadKB += cyclePayloadKB;
@@ -471,6 +342,9 @@ async function syncNow(trigger = 'auto') {
       _queueDrainTs = Date.now();
     }
 
+    if (pushedOps > 0) {
+      _addEvent({ type: 'sync_done', detail: `Pushed ~${pushedOps} queued op${pushedOps === 1 ? '' : 's'} to server` });
+    }
     _addEvent({ type: 'sync_done', detail: `Synced ${_latestRecords.length} records · ${durationMs}ms` });
 
     _addCycleLog({
@@ -661,8 +535,10 @@ async function checkConsistency(runId) {
   const checkedTs = new Date().toISOString();
   let serverTasks = [];
   try {
-    const { records } = await _api('/api/tasks');
-    serverTasks = records || [];
+    const res = await fetch(`${API_BASE_URL}/api/tasks`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    serverTasks = data.records || [];
   } catch (err) {
     _addEvent({ type: 'sync_error', detail: `Consistency check failed: ${err.message}`, severity: 'error' });
     return [];

@@ -19,7 +19,11 @@ export default function TasksPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState(() => dataService.getMode());
+  const [mode, setMode] = useState('without-library');
+
+  useEffect(() => {
+    setMode(dataService.getMode());
+  }, []);
   const [syncEvents, setSyncEvents] = useState([]);
   const [cycleLogs, setCycleLogs] = useState([]);
   const [runLogs, setRunLogs] = useState([]);

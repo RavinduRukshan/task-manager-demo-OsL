@@ -5,9 +5,11 @@ const { Pool } = require('pg');
 // set rejectUnauthorized:true internally, then enforce our own ssl config.
 const connectionString = (process.env.DATABASE_URL || '').replace(/[?&]sslmode=[^&]*/g, '');
 
+const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
+
 const pool = new Pool({
   connectionString,
-  ssl: {
+  ssl: isLocal ? false : {
     rejectUnauthorized: false,
   },
 });
