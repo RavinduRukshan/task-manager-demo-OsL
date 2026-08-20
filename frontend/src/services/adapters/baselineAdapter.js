@@ -556,6 +556,14 @@ function clearLogs(target) {
   _notifyAll();
 }
 
+async function pruneCache(maxRecords = 50) {
+  return { pruned: 0, kept: _latestRecords.length };
+}
+
+async function clearCache() {
+  return { ok: true };
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 const baselineAdapter = {
@@ -576,6 +584,8 @@ const baselineAdapter = {
   endRun,
   checkConsistency,
   clearLogs,
+  pruneCache,
+  clearCache,
 };
 
 export default baselineAdapter;

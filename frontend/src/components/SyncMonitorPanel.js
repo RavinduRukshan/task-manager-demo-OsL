@@ -32,7 +32,12 @@ import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogContentText from '@mui/material/DialogContentText';
 import DialogActions from '@mui/material/DialogActions';
+import TextField from '@mui/material/TextField';
+import AutoDeleteIcon from '@mui/icons-material/AutoDelete';
+import LayersClearIcon from '@mui/icons-material/LayersClear';
 import * as XLSX from 'xlsx';
 
 const SCENARIO_LABELS = {
@@ -114,6 +119,8 @@ export default function SyncMonitorPanel({
   onStopAutoSync,
   onPauseSync,
   onResumeSync,
+  onPruneCache,
+  onClearCache,
   getMetrics,
   syncEvents = [],
   cycleLogs = [],
@@ -140,6 +147,9 @@ export default function SyncMonitorPanel({
     conflictsDetected: 0,
   });
   const [confirmClear, setConfirmClear] = useState(false);
+  const [pruneDialogOpen, setPruneDialogOpen] = useState(false);
+  const [pruneMax, setPruneMax] = useState(5);
+  const [clearCacheDialogOpen, setClearCacheDialogOpen] = useState(false);
   const TAB_DATA = [cycleLogs, runLogs, syncEvents, consistencyLogs];
 
   useEffect(() => {
@@ -287,12 +297,42 @@ export default function SyncMonitorPanel({
               <Divider orientation="vertical" flexItem />
 
               {/* Sync controls */}
-              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
                 <Button size="small" variant="contained"  onClick={onSyncNow}       sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Sync Now</Button>
                 <Button size="small" variant="outlined"   onClick={onStartAutoSync} sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Auto ▶</Button>
                 <Button size="small" variant="outlined"   onClick={onStopAutoSync}  sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Auto ■</Button>
                 <Button size="small" variant="outlined"   onClick={onPauseSync}     sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Pause</Button>
                 <Button size="small" variant="outlined"   onClick={onResumeSync}    sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Resume</Button>
+
+                {mode === 'with-library' && (
+                  <>
+                    <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+                    <Tooltip title="Prune oldest cached records from IndexedDB">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="secondary"
+                        startIcon={<AutoDeleteIcon sx={{ fontSize: '0.85rem !important' }} />}
+                        onClick={() => setPruneDialogOpen(true)}
+                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
+                      >
+                        Prune Cache
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title="Clear cached records while preserving queued ops">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        startIcon={<LayersClearIcon sx={{ fontSize: '0.85rem !important' }} />}
+                        onClick={() => setClearCacheDialogOpen(true)}
+                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
+                      >
+                        Clear Cache
+                      </Button>
+                    </Tooltip>
+                  </>
+                )}
               </Box>
             </>
           )}
@@ -475,7 +515,15 @@ export default function SyncMonitorPanel({
                           <TableCell sx={{ ...TD, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.run_id}>{e.run_id ?? '—'}</TableCell>
                           <TableCell sx={TD}>{e.cycle_id ?? '—'}</TableCell>
                           <TableCell sx={TD}>{e.event_ts ? new Date(e.event_ts).toLocaleTimeString() : '—'}</TableCell>
-                          <TableCell sx={TD}>{e.event_type}</TableCell>
+                          <TableCell sx={TD}>
+                            {e.event_type === 'cache_pruned' ? (
+                              <Chip label="cache_pruned" size="small" color="secondary" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'cache_cleared' ? (
+                              <Chip label="cache_cleared" size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : (
+                              e.event_type
+                            )}
+                          </TableCell>
                           <TableCell sx={TD}>{e.task_id ?? '—'}</TableCell>
                           <TableCell sx={{ ...TD, color: SEVERITY_COLORS[e.severity] || 'inherit', fontWeight: e.severity !== 'info' ? 600 : 400 }}>{e.severity}</TableCell>
                           <TableCell sx={{ ...TD, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.detail}>{e.detail}</TableCell>
@@ -578,6 +626,68 @@ export default function SyncMonitorPanel({
                   onClearLogs && onClearLogs(TAB_CONFIG[tab].target);
                   setConfirmClear(false);
                 }}>Clear</Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* Prune Cache Dialog */}
+            <Dialog open={pruneDialogOpen} onClose={() => setPruneDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle sx={{ fontSize: '0.9rem', pb: 1 }}>
+                Prune Local Cache
+              </DialogTitle>
+              <DialogContent sx={{ pt: 1 }}>
+                <DialogContentText sx={{ fontSize: '0.8rem', mb: 2 }}>
+                  Keep only the newest records in local IndexedDB. Oldest records will be evicted. Records with pending unsynced operations will be preserved.
+                </DialogContentText>
+                <TextField
+                  type="number"
+                  size="small"
+                  label="Max Records to Keep"
+                  value={pruneMax}
+                  onChange={(e) => setPruneMax(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  fullWidth
+                  inputProps={{ min: 0 }}
+                  sx={{ '& input': { fontSize: '0.85rem' } }}
+                />
+              </DialogContent>
+              <DialogActions>
+                <Button size="small" onClick={() => setPruneDialogOpen(false)}>Cancel</Button>
+                <Button
+                  size="small"
+                  color="secondary"
+                  variant="contained"
+                  onClick={async () => {
+                    setPruneDialogOpen(false);
+                    if (onPruneCache) await onPruneCache(pruneMax);
+                  }}
+                >
+                  Prune to {pruneMax}
+                </Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* Clear Cache Dialog */}
+            <Dialog open={clearCacheDialogOpen} onClose={() => setClearCacheDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle sx={{ fontSize: '0.9rem', pb: 1 }}>
+                Clear Local Cache
+              </DialogTitle>
+              <DialogContent sx={{ pt: 1 }}>
+                <DialogContentText sx={{ fontSize: '0.8rem' }}>
+                  Clear all cached tasks from local IndexedDB? Pending unsynced operations in the ops queue will NOT be deleted.
+                </DialogContentText>
+              </DialogContent>
+              <DialogActions>
+                <Button size="small" onClick={() => setClearCacheDialogOpen(false)}>Cancel</Button>
+                <Button
+                  size="small"
+                  color="warning"
+                  variant="contained"
+                  onClick={async () => {
+                    setClearCacheDialogOpen(false);
+                    if (onClearCache) await onClearCache();
+                  }}
+                >
+                  Clear Cache
+                </Button>
               </DialogActions>
             </Dialog>
           </>

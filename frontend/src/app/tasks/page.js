@@ -95,6 +95,24 @@ export default function TasksPage() {
   async function handleCheckConsistency() { await dataService.checkConsistency(); }
   function handleClearLogs(target) { dataService.clearLogs(target); }
 
+  async function handlePruneCache(maxRecords) {
+    try {
+      const result = await dataService.pruneCache(maxRecords);
+      showSnackbar(`Pruned ${result.pruned} task(s), ${result.kept} remaining in cache`);
+    } catch (err) {
+      showSnackbar(`Prune failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function handleClearCache() {
+    try {
+      await dataService.clearCache();
+      showSnackbar('Local cache cleared (unsynced operations preserved)');
+    } catch (err) {
+      showSnackbar(`Clear cache failed: ${err.message}`, 'error');
+    }
+  }
+
   return (
     <Box
       sx={{
@@ -159,6 +177,8 @@ export default function TasksPage() {
           onStopAutoSync={dataService.stopAutoSync}
           onPauseSync={dataService.pauseSync}
           onResumeSync={dataService.resumeSync}
+          onPruneCache={handlePruneCache}
+          onClearCache={handleClearCache}
           getMetrics={dataService.getMetrics}
           syncEvents={syncEvents}
           cycleLogs={cycleLogs}

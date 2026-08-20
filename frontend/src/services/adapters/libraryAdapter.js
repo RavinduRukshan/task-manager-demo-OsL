@@ -149,6 +149,14 @@ function _onLibraryEvent(evt) {
     case 'sync_error':
       _addEvent({ type: 'sync_error', detail: evt.error || '', severity: 'error' });
       break;
+    case 'cache_pruned':
+      _addEvent({
+        type: 'cache_pruned',
+        detail: `Auto-pruned ${evt.pruned} cached task${evt.pruned === 1 ? '' : 's'} (${evt.kept} kept)`,
+        severity: 'info',
+      });
+      list().catch(() => {});
+      break;
     default:
       break;
   }
@@ -163,6 +171,9 @@ function client() {
       syncIntervalMs: 15000,
       maxRetries: 3,
       backoffBaseMs: 500,
+      cacheLimits: {
+        tasks: 50,
+      },
       onEvent: _onLibraryEvent,
     });
     // Library subscribe fires when local IndexedDB changes (e.g. offline CRUD)
@@ -660,6 +671,35 @@ function clearLogs(target) {
   _notifyAll();
 }
 
+async function pruneCache(maxRecords = 50) {
+  const sdk = client();
+  if (!sdk?.cache?.prune) return { pruned: 0, kept: _latestRecords.length };
+  const result = await sdk.cache.prune('tasks', maxRecords);
+  _addEvent({
+    type: 'cache_pruned',
+    detail: `Manually pruned ${result.pruned} task${result.pruned === 1 ? '' : 's'} (${result.kept} kept, max: ${maxRecords})`,
+    severity: 'info',
+  });
+  const records = await sdk.list();
+  _latestRecords = records || [];
+  _notifyAll();
+  return result;
+}
+
+async function clearCache() {
+  const sdk = client();
+  if (!sdk?.cache?.clear) return { ok: true };
+  await sdk.cache.clear('tasks');
+  _addEvent({
+    type: 'cache_cleared',
+    detail: 'Local cache cleared (unsynced ops preserved)',
+    severity: 'info',
+  });
+  _latestRecords = [];
+  _notifyAll();
+  return { ok: true };
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 const libraryAdapter = {
@@ -680,6 +720,8 @@ const libraryAdapter = {
   endRun,
   checkConsistency,
   clearLogs,
+  pruneCache,
+  clearCache,
 };
 
 export default libraryAdapter;
