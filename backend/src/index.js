@@ -8,7 +8,10 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Middleware
-app.use(cors({ origin: 'http://localhost:3000' }));
+app.use(cors({
+  origin: 'http://localhost:3000',
+  exposedHeaders: ['x-schema-version', 'Date', 'x-user-id'],
+}));
 app.use(express.json());
 
 // Request logging
@@ -46,14 +49,16 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 
-  db.query('SELECT 1')
-    .then(() => {
-      console.log('Database connected successfully');
-    })
-    .catch((err) => {
-      console.error('Database connection failed:', err.message);
-    });
+  try {
+    await db.query('SELECT 1');
+    console.log('Database connected successfully');
+    if (db.autoMigrate) {
+      await db.autoMigrate();
+    }
+  } catch (err) {
+    console.error('Database connection failed:', err.message);
+  }
 });
