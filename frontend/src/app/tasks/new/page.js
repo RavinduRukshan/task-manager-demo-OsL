@@ -50,6 +50,7 @@ export default function NewTaskPage() {
 
       <Paper sx={{ p: 3, mt: 2 }}>
         <TaskForm
+          initialValues={{ userId: dataService.getActiveUserId?.() || 'alice' }}
           onSubmit={safeSubmit}
           onCancel={() => router.push('/tasks')}
           submitLabel="Create Task"
