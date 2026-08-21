@@ -49,6 +49,10 @@ export const startRun         = (...args) => _active.startRun(...args);
 export const endRun           = (...args) => _active.endRun(...args);
 export const checkConsistency = (...args) => _active.checkConsistency(...args);
 export const clearLogs        = (...args) => _active.clearLogs(...args);
-export const pruneCache       = (...args) => _active.pruneCache?.(...args);
-export const clearCache       = (...args) => _active.clearCache?.(...args);
+export const pruneCache           = (...args) => _active.pruneCache?.(...args);
+export const clearCache           = (...args) => _active.clearCache?.(...args);
+export const getDeadLetterOps     = (...args) => _active.getDeadLetterOps?.(...args);
+export const retryDeadLetterOp    = (...args) => _active.retryDeadLetterOp?.(...args);
+export const discardDeadLetterOps = (...args) => _active.discardDeadLetterOps?.(...args);
+export const getClockOffset       = (...args) => _active.getClockOffset?.(...args);
 

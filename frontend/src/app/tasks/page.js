@@ -113,6 +113,24 @@ export default function TasksPage() {
     }
   }
 
+  async function handleRetryDeadLetterOp(opKey) {
+    try {
+      await dataService.retryDeadLetterOp(opKey);
+      showSnackbar('Re-queued operation for next sync');
+    } catch (err) {
+      showSnackbar(`Retry failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function handleDiscardDeadLetterOps() {
+    try {
+      const result = await dataService.discardDeadLetterOps();
+      showSnackbar(`Discarded ${result.discarded} dead-letter operation(s)`);
+    } catch (err) {
+      showSnackbar(`Discard failed: ${err.message}`, 'error');
+    }
+  }
+
   return (
     <Box
       sx={{
@@ -179,6 +197,10 @@ export default function TasksPage() {
           onResumeSync={dataService.resumeSync}
           onPruneCache={handlePruneCache}
           onClearCache={handleClearCache}
+          onGetDeadLetterOps={dataService.getDeadLetterOps}
+          onRetryDeadLetterOp={handleRetryDeadLetterOp}
+          onDiscardDeadLetterOps={handleDiscardDeadLetterOps}
+          getClockOffset={dataService.getClockOffset}
           getMetrics={dataService.getMetrics}
           syncEvents={syncEvents}
           cycleLogs={cycleLogs}

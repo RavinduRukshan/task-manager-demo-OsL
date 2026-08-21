@@ -564,6 +564,22 @@ async function clearCache() {
   return { ok: true };
 }
 
+async function getDeadLetterOps() {
+  return [];
+}
+
+async function retryDeadLetterOp() {
+  return null;
+}
+
+async function discardDeadLetterOps() {
+  return { discarded: 0 };
+}
+
+function getClockOffset() {
+  return 0;
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 const baselineAdapter = {
@@ -586,6 +602,10 @@ const baselineAdapter = {
   clearLogs,
   pruneCache,
   clearCache,
+  getDeadLetterOps,
+  retryDeadLetterOp,
+  discardDeadLetterOps,
+  getClockOffset,
 };
 
 export default baselineAdapter;

@@ -139,7 +139,7 @@ function _onLibraryEvent(evt) {
     case 'conflict':
       _conflictsDetected++;
       _runConflicts++;
-      _addEvent({ type: 'conflict', detail: `Conflict on task ${evt.id}`, task_id: evt.id, severity: 'warn' });
+      _addEvent({ type: 'conflict', detail: `Field-level conflict resolved on task ${evt.id}`, task_id: evt.id, severity: 'warn' });
       break;
     case 'retry':
       _retryCount++;
@@ -157,6 +157,28 @@ function _onLibraryEvent(evt) {
       });
       list().catch(() => {});
       break;
+    case 'op_dead_letter':
+      _addEvent({
+        type: 'op_dead_letter',
+        detail: `Op ${evt.op?.type || ''} on task ${evt.op?.id || evt.id || ''} quarantined to DLQ: ${evt.error || ''}`,
+        task_id: evt.op?.id || evt.id,
+        severity: 'error',
+      });
+      break;
+    case 'sync_skipped':
+      _addEvent({
+        type: 'sync_skipped',
+        detail: `Sync skipped: ${evt.reason || 'Web Lock held by another tab'}`,
+        severity: 'info',
+      });
+      break;
+    case 'schema_drift':
+      _addEvent({
+        type: 'schema_drift',
+        detail: `Schema drift detected: server schema version ${evt.serverVersion ?? 'newer'}`,
+        severity: 'warn',
+      });
+      break;
     default:
       break;
   }
@@ -170,7 +192,10 @@ function client() {
       resourceName: 'tasks',
       syncIntervalMs: 15000,
       maxRetries: 3,
+      maxPermanentFailures: 5,
       backoffBaseMs: 500,
+      conflictResolver: 'field-level',
+      enableTabCoordination: true,
       cacheLimits: {
         tasks: 50,
       },
@@ -430,7 +455,13 @@ async function syncNow(trigger = 'auto') {
 }
 
 async function getMetrics() {
-  const queuedOpsCount = await _getQueuedOpsCount();
+  const sdk = client();
+  let sdkMetrics = null;
+  if (sdk?.getMetrics) {
+    try { sdkMetrics = await sdk.getMetrics(); } catch (_) {}
+  }
+  const queuedOpsCount = sdkMetrics ? sdkMetrics.queuedOpsCount : await _getQueuedOpsCount();
+  const deadLetteredOpsCount = sdkMetrics ? (sdkMetrics.deadLetteredOpsCount || 0) : 0;
   const total = _syncSuccessCount + _syncFailCount;
   return {
     syncSuccessRate: total === 0 ? 0 : Math.round((_syncSuccessCount / total) * 100),
@@ -440,6 +471,7 @@ async function getMetrics() {
         : Math.round(_latencySamples.reduce((a, b) => a + b, 0) / _latencySamples.length),
     retryCount: _retryCount,
     queuedOpsCount,
+    deadLetteredOpsCount,
     conflictsDetected: _conflictsDetected,
   };
 }
@@ -700,6 +732,44 @@ async function clearCache() {
   return { ok: true };
 }
 
+async function getDeadLetterOps() {
+  const sdk = client();
+  if (!sdk?.getDeadLetterOps) return [];
+  return sdk.getDeadLetterOps();
+}
+
+async function retryDeadLetterOp(opKey) {
+  const sdk = client();
+  if (!sdk?.retryDeadLetterOp) return null;
+  const result = await sdk.retryDeadLetterOp(opKey);
+  _addEvent({
+    type: 'dlq_retry',
+    detail: `Re-queued dead-letter operation (key: ${opKey})`,
+    severity: 'info',
+  });
+  _notifyAll();
+  return result;
+}
+
+async function discardDeadLetterOps() {
+  const sdk = client();
+  if (!sdk?.discardDeadLetterOps) return { discarded: 0 };
+  const result = await sdk.discardDeadLetterOps();
+  _addEvent({
+    type: 'dlq_discard',
+    detail: `Discarded ${result.discarded} dead-letter operation(s)`,
+    severity: 'info',
+  });
+  _notifyAll();
+  return result;
+}
+
+function getClockOffset() {
+  const sdk = client();
+  if (!sdk?.getClockOffset) return 0;
+  return sdk.getClockOffset();
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 const libraryAdapter = {
@@ -722,6 +792,10 @@ const libraryAdapter = {
   clearLogs,
   pruneCache,
   clearCache,
+  getDeadLetterOps,
+  retryDeadLetterOp,
+  discardDeadLetterOps,
+  getClockOffset,
 };
 
 export default libraryAdapter;

@@ -38,6 +38,8 @@ import DialogActions from '@mui/material/DialogActions';
 import TextField from '@mui/material/TextField';
 import AutoDeleteIcon from '@mui/icons-material/AutoDelete';
 import LayersClearIcon from '@mui/icons-material/LayersClear';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
+import ReplayIcon from '@mui/icons-material/Replay';
 import * as XLSX from 'xlsx';
 
 const SCENARIO_LABELS = {
@@ -121,6 +123,10 @@ export default function SyncMonitorPanel({
   onResumeSync,
   onPruneCache,
   onClearCache,
+  onGetDeadLetterOps,
+  onRetryDeadLetterOp,
+  onDiscardDeadLetterOps,
+  getClockOffset,
   getMetrics,
   syncEvents = [],
   cycleLogs = [],
@@ -144,12 +150,16 @@ export default function SyncMonitorPanel({
     avgSyncLatencyMs: 0,
     retryCount: 0,
     queuedOpsCount: 0,
+    deadLetteredOpsCount: 0,
     conflictsDetected: 0,
   });
   const [confirmClear, setConfirmClear] = useState(false);
   const [pruneDialogOpen, setPruneDialogOpen] = useState(false);
   const [pruneMax, setPruneMax] = useState(5);
   const [clearCacheDialogOpen, setClearCacheDialogOpen] = useState(false);
+  const [dlqDialogOpen, setDlqDialogOpen] = useState(false);
+  const [dlqOps, setDlqOps] = useState([]);
+  const [dlqLoading, setDlqLoading] = useState(false);
   const TAB_DATA = [cycleLogs, runLogs, syncEvents, consistencyLogs];
 
   useEffect(() => {
@@ -331,6 +341,28 @@ export default function SyncMonitorPanel({
                         Clear Cache
                       </Button>
                     </Tooltip>
+                    <Tooltip title="View & manage quarantined operations in Dead-Letter Queue">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color={metrics.deadLetteredOpsCount > 0 ? 'error' : 'inherit'}
+                        startIcon={<WarningAmberIcon sx={{ fontSize: '0.85rem !important' }} />}
+                        onClick={async () => {
+                          setDlqDialogOpen(true);
+                          setDlqLoading(true);
+                          if (onGetDeadLetterOps) {
+                            try {
+                              const ops = await onGetDeadLetterOps();
+                              setDlqOps(ops || []);
+                            } catch (_) {}
+                          }
+                          setDlqLoading(false);
+                        }}
+                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
+                      >
+                        DLQ {metrics.deadLetteredOpsCount > 0 ? `(${metrics.deadLetteredOpsCount})` : ''}
+                      </Button>
+                    </Tooltip>
                   </>
                 )}
               </Box>
@@ -362,6 +394,7 @@ export default function SyncMonitorPanel({
               <MetricBadge label="Success Rate" value={`${metrics.syncSuccessRate}%`} />
               <MetricBadge label="Avg Latency"  value={`${metrics.avgSyncLatencyMs} ms`} />
               <MetricBadge label="Queued"        value={metrics.queuedOpsCount} />
+              <MetricBadge label="DLQ"           value={metrics.deadLetteredOpsCount || 0} color={metrics.deadLetteredOpsCount > 0 ? 'error.main' : 'inherit'} />
               <MetricBadge label="Retries"       value={metrics.retryCount} />
               <MetricBadge label="Conflicts"     value={metrics.conflictsDetected} />
             </Box>
@@ -520,6 +553,16 @@ export default function SyncMonitorPanel({
                               <Chip label="cache_pruned" size="small" color="secondary" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                             ) : e.event_type === 'cache_cleared' ? (
                               <Chip label="cache_cleared" size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'op_dead_letter' ? (
+                              <Chip label="op_dead_letter" size="small" color="error" variant="filled" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'sync_skipped' ? (
+                              <Chip label="sync_skipped" size="small" color="info" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'schema_drift' ? (
+                              <Chip label="schema_drift" size="small" color="warning" variant="filled" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'dlq_retry' ? (
+                              <Chip label="dlq_retry" size="small" color="primary" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'dlq_discard' ? (
+                              <Chip label="dlq_discard" size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                             ) : (
                               e.event_type
                             )}
@@ -690,6 +733,92 @@ export default function SyncMonitorPanel({
                 </Button>
               </DialogActions>
             </Dialog>
+            {/* Dead-Letter Queue (DLQ) Dialog */}
+            <Dialog open={dlqDialogOpen} onClose={() => setDlqDialogOpen(false)} maxWidth="sm" fullWidth>
+              <DialogTitle sx={{ fontSize: '0.95rem', pb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                <WarningAmberIcon color="warning" fontSize="small" />
+                Dead-Letter Queue (Quarantined Operations)
+              </DialogTitle>
+              <DialogContent sx={{ pt: 1 }}>
+                <DialogContentText sx={{ fontSize: '0.8rem', mb: 1.5 }}>
+                  Operations that encountered permanent non-retryable client errors (e.g. 400, 422, 403) are quarantined here to prevent poison pill loops and repeated backend spam.
+                </DialogContentText>
+                {dlqLoading ? (
+                  <Typography variant="caption" color="text.secondary">Loading DLQ operations...</Typography>
+                ) : dlqOps.length === 0 ? (
+                  <Box sx={{ p: 2, textAlign: 'center', bgcolor: 'action.hover', borderRadius: 1 }}>
+                    <Typography variant="body2" color="text.secondary">
+                      No quarantined operations in the Dead-Letter Queue.
+                    </Typography>
+                  </Box>
+                ) : (
+                  <TableContainer sx={{ maxHeight: 260, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell sx={TH}>Type</TableCell>
+                          <TableCell sx={TH}>Task ID</TableCell>
+                          <TableCell sx={TH}>Error / Detail</TableCell>
+                          <TableCell sx={TH} align="right">Action</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {dlqOps.map((op) => (
+                          <TableRow key={op.key || op.id} hover>
+                            <TableCell sx={TD}>
+                              <Chip label={op.type} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            </TableCell>
+                            <TableCell sx={TD}>{op.id || '—'}</TableCell>
+                            <TableCell sx={{ ...TD, color: 'error.main', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }} title={op.lastError || op.error}>
+                              {op.lastError || op.error || 'Permanent failure'}
+                            </TableCell>
+                            <TableCell sx={TD} align="right">
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                color="primary"
+                                startIcon={<ReplayIcon sx={{ fontSize: '0.75rem !important' }} />}
+                                onClick={async () => {
+                                  if (onRetryDeadLetterOp) {
+                                    await onRetryDeadLetterOp(op.key);
+                                    if (onGetDeadLetterOps) {
+                                      const updated = await onGetDeadLetterOps();
+                                      setDlqOps(updated || []);
+                                    }
+                                  }
+                                }}
+                                sx={{ fontSize: '0.65rem', py: 0.2, px: 0.6, textTransform: 'none' }}
+                              >
+                                Retry
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                )}
+              </DialogContent>
+              <DialogActions sx={{ px: 3, pb: 2 }}>
+                {dlqOps.length > 0 && (
+                  <Button
+                    size="small"
+                    color="error"
+                    variant="outlined"
+                    onClick={async () => {
+                      if (onDiscardDeadLetterOps) {
+                        await onDiscardDeadLetterOps();
+                        setDlqOps([]);
+                      }
+                    }}
+                    sx={{ mr: 'auto', textTransform: 'none' }}
+                  >
+                    Discard All ({dlqOps.length})
+                  </Button>
+                )}
+                <Button size="small" onClick={() => setDlqDialogOpen(false)}>Close</Button>
+              </DialogActions>
+            </Dialog>
           </>
         )}
       </Paper>
@@ -697,13 +826,13 @@ export default function SyncMonitorPanel({
   );
 }
 
-function MetricBadge({ label, value }) {
+function MetricBadge({ label, value, color }) {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 60 }}>
       <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1 }}>
         {label}
       </Typography>
-      <Typography variant="body2" fontWeight="bold" sx={{ lineHeight: 1.4 }}>
+      <Typography variant="body2" fontWeight="bold" sx={{ lineHeight: 1.4, color: color || 'inherit' }}>
         {value}
       </Typography>
     </Box>
