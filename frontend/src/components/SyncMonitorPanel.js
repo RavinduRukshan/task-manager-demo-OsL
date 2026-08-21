@@ -40,18 +40,28 @@ import AutoDeleteIcon from '@mui/icons-material/AutoDelete';
 import LayersClearIcon from '@mui/icons-material/LayersClear';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import ReplayIcon from '@mui/icons-material/Replay';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import DynamicFeedIcon from '@mui/icons-material/DynamicFeed';
+import BugReportIcon from '@mui/icons-material/BugReport';
+import StorageIcon from '@mui/icons-material/Storage';
 import * as XLSX from 'xlsx';
 
 const SCENARIO_LABELS = {
   S1: 'S1 — Offline Create & Reconnect',
-  S2: 'S2 — Rapid Repeated Update',
-  S3: 'S3 — Temporary Server Failure',
-  S4: 'S4 — Concurrent Edit Conflict',
+  S2: 'S2 — Rapid Repeated Update & Coalescing',
+  S3: 'S3 — Temporary Server Failure & Backoff',
+  S4: 'S4 — Concurrent Edit Conflict & Field Merge',
+  S5: 'S5 — Poison Pill 4xx & Dead-Letter Queue (DLQ)',
+  S6: 'S6 — Multi-Tab Concurrency & Web Locks',
+  S7: 'S7 — Multi-User Tenant Isolation & Account Switching',
+  S8: 'S8 — At-Rest Vault Encryption (AES-GCM-256)',
+  S9: 'S9 — Domain Schema Versioning & Migration',
+  S10: 'S10 — Clock Skew Mitigation & Monotonicity',
 };
 
 const SEVERITY_COLORS = { info: 'inherit', warn: 'warning.main', error: 'error.main' };
 
-// â”€â”€â”€ Shared thin-cell style â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Shared thin-cell style ───────────────────────────────────────────────────
 const TH = { py: 0.3, px: 0.75, fontWeight: 700, fontSize: '0.7rem', whiteSpace: 'nowrap' };
 const TD = { py: 0.25, px: 0.75, fontSize: '0.7rem', whiteSpace: 'nowrap' };
 
@@ -90,9 +100,8 @@ function exportExcel(allData, filename) {
       cols.forEach(c => { out[c] = row[c] ?? ''; });
       return out;
     }), { header: cols });
-    // Set column widths based on header length
     ws['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 2, 12) }));
-    XLSX.utils.book_append_sheet(wb, ws, label.substring(0, 31)); // sheet name max 31 chars
+    XLSX.utils.book_append_sheet(wb, ws, label.substring(0, 31));
   });
   XLSX.writeFile(wb, filename);
 }
@@ -115,7 +124,7 @@ function exportCsv(rows, cols, filename) {
 }
 
 export default function SyncMonitorPanel({
-  mode = 'without-library',
+  mode = 'with-library',
   onSyncNow,
   onStartAutoSync,
   onStopAutoSync,
@@ -127,6 +136,15 @@ export default function SyncMonitorPanel({
   onRetryDeadLetterOp,
   onDiscardDeadLetterOps,
   getClockOffset,
+  setClockOffset,
+  getSchemaVersion,
+  onMigrate,
+  onTriggerPoisonPill,
+  onSimulateSchemaDrift,
+  userId = 'alice',
+  dbName = '',
+  schemaVersion = 1,
+  encrypted = false,
   getMetrics,
   syncEvents = [],
   cycleLogs = [],
@@ -153,6 +171,7 @@ export default function SyncMonitorPanel({
     deadLetteredOpsCount: 0,
     conflictsDetected: 0,
   });
+
   const [confirmClear, setConfirmClear] = useState(false);
   const [pruneDialogOpen, setPruneDialogOpen] = useState(false);
   const [pruneMax, setPruneMax] = useState(5);
@@ -160,6 +179,16 @@ export default function SyncMonitorPanel({
   const [dlqDialogOpen, setDlqDialogOpen] = useState(false);
   const [dlqOps, setDlqOps] = useState([]);
   const [dlqLoading, setDlqLoading] = useState(false);
+
+  // Clock skew dialog
+  const [clockDialogOpen, setClockDialogOpen] = useState(false);
+  const [clockSkewInput, setClockSkewInput] = useState(0);
+  const [currentClockSkew, setCurrentClockSkew] = useState(0);
+
+  // Schema migration dialog
+  const [schemaDialogOpen, setSchemaDialogOpen] = useState(false);
+  const [activeSchemaVer, setActiveSchemaVer] = useState(schemaVersion || 1);
+
   const TAB_DATA = [cycleLogs, runLogs, syncEvents, consistencyLogs];
 
   useEffect(() => {
@@ -176,12 +205,20 @@ export default function SyncMonitorPanel({
   }, []);
 
   useEffect(() => {
-    getMetrics().then(setMetrics);
-  }, [syncEvents, getMetrics]);
+    if (getMetrics) {
+      getMetrics().then(setMetrics).catch(() => {});
+    }
+    if (getClockOffset) {
+      setCurrentClockSkew(getClockOffset());
+    }
+    if (getSchemaVersion) {
+      getSchemaVersion().then(setActiveSchemaVer).catch(() => {});
+    }
+  }, [syncEvents, getMetrics, getClockOffset, getSchemaVersion]);
 
   const wrapperSx = rightDock
     ? {
-        width: collapsed ? 56 : 620,
+        width: collapsed ? 56 : 640,
         minWidth: collapsed ? 56 : 320,
         maxWidth: collapsed ? 56 : 960,
         resize: collapsed ? 'none' : 'horizontal',
@@ -207,8 +244,8 @@ export default function SyncMonitorPanel({
           bgcolor: 'background.paper',
         }}
       >
-        {/* â”€â”€ Header row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', mb: 0.5 }}>
+        {/* ── Header row ── */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.5 }}>
           <Typography variant="subtitle2" fontWeight="bold" sx={{ mr: 0.5 }}>
             {collapsed ? 'Sync' : 'Sync Monitor'}
           </Typography>
@@ -230,31 +267,40 @@ export default function SyncMonitorPanel({
                 label={isOnline ? 'Online' : 'Offline'}
                 color={isOnline ? 'success' : 'error'}
                 size="small"
+                sx={{ height: 22, fontSize: '0.7rem' }}
               />
               <Chip
-                label={mode === 'with-library' ? 'Library' : 'Direct Fetch'}
+                label={mode === 'with-library' ? 'SDK v0.4.0' : 'Direct Fetch'}
                 color={mode === 'with-library' ? 'primary' : 'default'}
                 size="small"
                 variant="outlined"
+                sx={{ height: 22, fontSize: '0.7rem' }}
+              />
+              <Chip
+                label={`User: ${userId}`}
+                color="secondary"
+                size="small"
+                variant="outlined"
+                sx={{ height: 22, fontSize: '0.7rem' }}
               />
 
-              {/* Scenario selector — locked while a run is active */}
-              <FormControl size="small" sx={{ minWidth: 90 }} disabled={runActive}>
+              {/* Scenario selector */}
+              <FormControl size="small" sx={{ minWidth: 100 }} disabled={runActive}>
                 <InputLabel id="scenario-select-label" sx={{ fontSize: '0.7rem' }}>Scenario</InputLabel>
                 <Select
                   labelId="scenario-select-label"
                   value={scenarioId}
                   label="Scenario"
                   onChange={e => onScenarioChange && onScenarioChange(e.target.value)}
-                  sx={{ fontSize: '0.75rem' }}
+                  sx={{ fontSize: '0.75rem', height: 28 }}
                 >
-                  {['N/A', 'S1', 'S2', 'S3', 'S4'].map(s => (
+                  {['N/A', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10'].map(s => (
                     <MenuItem key={s} value={s} sx={{ fontSize: '0.75rem' }}>{s}</MenuItem>
                   ))}
                 </Select>
               </FormControl>
 
-              <Divider orientation="vertical" flexItem />
+              <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
 
               {/* Run lifecycle buttons */}
               <Tooltip title={runActive ? '' : (scenarioId === 'N/A' ? 'Select a scenario first' : 'Start a new run')}>
@@ -263,10 +309,10 @@ export default function SyncMonitorPanel({
                     size="small"
                     variant="contained"
                     color="success"
-                    startIcon={<PlayArrowIcon />}
+                    startIcon={<PlayArrowIcon sx={{ fontSize: '0.85rem !important' }} />}
                     disabled={runActive || scenarioId === 'N/A'}
                     onClick={() => onStartRun && onStartRun(scenarioId)}
-                    sx={{ textTransform: 'none', fontSize: '0.72rem' }}
+                    sx={{ textTransform: 'none', fontSize: '0.7rem', py: 0.2 }}
                   >
                     Start Run
                   </Button>
@@ -279,10 +325,10 @@ export default function SyncMonitorPanel({
                     size="small"
                     variant="contained"
                     color="error"
-                    startIcon={<StopIcon />}
+                    startIcon={<StopIcon sx={{ fontSize: '0.85rem !important' }} />}
                     disabled={!runActive}
                     onClick={() => onEndRun && onEndRun()}
-                    sx={{ textTransform: 'none', fontSize: '0.72rem' }}
+                    sx={{ textTransform: 'none', fontSize: '0.7rem', py: 0.2 }}
                   >
                     End Run
                   </Button>
@@ -294,129 +340,195 @@ export default function SyncMonitorPanel({
                   <Button
                     size="small"
                     variant="outlined"
-                    startIcon={<FactCheckIcon />}
+                    startIcon={<FactCheckIcon sx={{ fontSize: '0.85rem !important' }} />}
                     disabled={!currentRunId && runLogs.length === 0}
                     onClick={() => onCheckConsistency && onCheckConsistency()}
-                    sx={{ textTransform: 'none', fontSize: '0.72rem' }}
+                    sx={{ textTransform: 'none', fontSize: '0.7rem', py: 0.2 }}
                   >
                     Check
                   </Button>
                 </span>
               </Tooltip>
-
-              <Divider orientation="vertical" flexItem />
-
-              {/* Sync controls */}
-              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
-                <Button size="small" variant="contained"  onClick={onSyncNow}       sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Sync Now</Button>
-                <Button size="small" variant="outlined"   onClick={onStartAutoSync} sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Auto ▶</Button>
-                <Button size="small" variant="outlined"   onClick={onStopAutoSync}  sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Auto ■</Button>
-                <Button size="small" variant="outlined"   onClick={onPauseSync}     sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Pause</Button>
-                <Button size="small" variant="outlined"   onClick={onResumeSync}    sx={{ fontSize: '0.7rem', textTransform: 'none' }}>Resume</Button>
-
-                {mode === 'with-library' && (
-                  <>
-                    <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-                    <Tooltip title="Prune oldest cached records from IndexedDB">
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        color="secondary"
-                        startIcon={<AutoDeleteIcon sx={{ fontSize: '0.85rem !important' }} />}
-                        onClick={() => setPruneDialogOpen(true)}
-                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
-                      >
-                        Prune Cache
-                      </Button>
-                    </Tooltip>
-                    <Tooltip title="Clear cached records while preserving queued ops">
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        color="warning"
-                        startIcon={<LayersClearIcon sx={{ fontSize: '0.85rem !important' }} />}
-                        onClick={() => setClearCacheDialogOpen(true)}
-                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
-                      >
-                        Clear Cache
-                      </Button>
-                    </Tooltip>
-                    <Tooltip title="View & manage quarantined operations in Dead-Letter Queue">
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        color={metrics.deadLetteredOpsCount > 0 ? 'error' : 'inherit'}
-                        startIcon={<WarningAmberIcon sx={{ fontSize: '0.85rem !important' }} />}
-                        onClick={async () => {
-                          setDlqDialogOpen(true);
-                          setDlqLoading(true);
-                          if (onGetDeadLetterOps) {
-                            try {
-                              const ops = await onGetDeadLetterOps();
-                              setDlqOps(ops || []);
-                            } catch (_) {}
-                          }
-                          setDlqLoading(false);
-                        }}
-                        sx={{ fontSize: '0.7rem', textTransform: 'none' }}
-                      >
-                        DLQ {metrics.deadLetteredOpsCount > 0 ? `(${metrics.deadLetteredOpsCount})` : ''}
-                      </Button>
-                    </Tooltip>
-                  </>
-                )}
-              </Box>
             </>
           )}
         </Box>
 
         {!collapsed && (
           <>
-            {/* Active run info bar */}
-            {runActive && currentRunId && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+            {/* ── Secondary Controls & Feature Action Bar ── */}
+            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center', mb: 0.5 }}>
+              <Button size="small" variant="contained" onClick={onSyncNow} sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}>
+                Sync Now
+              </Button>
+              <Button size="small" variant="outlined" onClick={onStartAutoSync} sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}>
+                Auto ▶
+              </Button>
+              <Button size="small" variant="outlined" onClick={onStopAutoSync} sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}>
+                Auto ■
+              </Button>
+              <Button size="small" variant="outlined" onClick={onPauseSync} sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}>
+                Pause
+              </Button>
+              <Button size="small" variant="outlined" onClick={onResumeSync} sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}>
+                Resume
+              </Button>
+
+              {mode === 'with-library' && (
+                <>
+                  <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
+
+                  {/* Clock Skew Simulator */}
+                  <Tooltip title="View NTP clock offset & calibrate / simulate device clock skew">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color={currentClockSkew !== 0 ? 'warning' : 'inherit'}
+                      startIcon={<AccessTimeIcon sx={{ fontSize: '0.8rem !important' }} />}
+                      onClick={() => setClockDialogOpen(true)}
+                      sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                    >
+                      Clock ({currentClockSkew}ms)
+                    </Button>
+                  </Tooltip>
+
+                  {/* Schema & Migrations */}
+                  <Tooltip title="Manage domain schema versions and test stepwise record migrations & drift">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="info"
+                      startIcon={<DynamicFeedIcon sx={{ fontSize: '0.8rem !important' }} />}
+                      onClick={() => setSchemaDialogOpen(true)}
+                      sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                    >
+                      Schema v{activeSchemaVer}
+                    </Button>
+                  </Tooltip>
+
+                  {/* Poison Pill Trigger for DLQ Testing */}
+                  {onTriggerPoisonPill && (
+                    <Tooltip title="Inject a poison pill operation to test 422 error & Dead-Letter Queue quarantine">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="error"
+                        startIcon={<BugReportIcon sx={{ fontSize: '0.8rem !important' }} />}
+                        onClick={async () => {
+                          await onTriggerPoisonPill('__POISON_PILL__');
+                        }}
+                        sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                      >
+                        Poison Pill
+                      </Button>
+                    </Tooltip>
+                  )}
+
+                  {/* Prune Cache */}
+                  <Tooltip title="Prune oldest cached records from IndexedDB">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="secondary"
+                      startIcon={<AutoDeleteIcon sx={{ fontSize: '0.8rem !important' }} />}
+                      onClick={() => setPruneDialogOpen(true)}
+                      sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                    >
+                      Prune Cache
+                    </Button>
+                  </Tooltip>
+
+                  {/* Clear Cache */}
+                  <Tooltip title="Clear cached records while preserving unsynced ops">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="warning"
+                      startIcon={<LayersClearIcon sx={{ fontSize: '0.8rem !important' }} />}
+                      onClick={() => setClearCacheDialogOpen(true)}
+                      sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                    >
+                      Clear Cache
+                    </Button>
+                  </Tooltip>
+
+                  {/* DLQ */}
+                  <Tooltip title="View & manage quarantined operations in Dead-Letter Queue">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color={metrics.deadLetteredOpsCount > 0 ? 'error' : 'inherit'}
+                      startIcon={<WarningAmberIcon sx={{ fontSize: '0.8rem !important' }} />}
+                      onClick={async () => {
+                        setDlqDialogOpen(true);
+                        setDlqLoading(true);
+                        if (onGetDeadLetterOps) {
+                          try {
+                            const ops = await onGetDeadLetterOps();
+                            setDlqOps(ops || []);
+                          } catch (_) {}
+                        }
+                        setDlqLoading(false);
+                      }}
+                      sx={{ fontSize: '0.68rem', textTransform: 'none', py: 0.2 }}
+                    >
+                      DLQ {metrics.deadLetteredOpsCount > 0 ? `(${metrics.deadLetteredOpsCount})` : ''}
+                    </Button>
+                  </Tooltip>
+                </>
+              )}
+            </Box>
+
+            {/* ── Active run info bar & Tenant metadata ── */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, flexWrap: 'wrap' }}>
+              {runActive && currentRunId && (
                 <Chip
                   label={`Run active: ${currentRunId}`}
                   color="warning"
                   size="small"
-                  sx={{ fontSize: '0.65rem', maxWidth: '100%' }}
+                  sx={{ fontSize: '0.65rem', height: 20 }}
                 />
-                <Typography variant="caption" color="text.secondary">
-                  {SCENARIO_LABELS[scenarioId] || scenarioId}
+              )}
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                {SCENARIO_LABELS[scenarioId] || scenarioId}
+              </Typography>
+              {dbName && (
+                <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem', ml: 'auto' }}>
+                  IDB: {dbName} {encrypted ? '🔒' : ''}
                 </Typography>
-              </Box>
-            )}
+              )}
+            </Box>
 
             <Divider sx={{ mb: 0.5 }} />
 
-            {/* Quick metrics row */}
-            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 0.5 }}>
+            {/* ── Quick metrics row ── */}
+            <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 0.5, justifyContent: 'space-between' }}>
               <MetricBadge label="Success Rate" value={`${metrics.syncSuccessRate}%`} />
               <MetricBadge label="Avg Latency"  value={`${metrics.avgSyncLatencyMs} ms`} />
               <MetricBadge label="Queued"        value={metrics.queuedOpsCount} />
               <MetricBadge label="DLQ"           value={metrics.deadLetteredOpsCount || 0} color={metrics.deadLetteredOpsCount > 0 ? 'error.main' : 'inherit'} />
               <MetricBadge label="Retries"       value={metrics.retryCount} />
               <MetricBadge label="Conflicts"     value={metrics.conflictsDetected} />
+              <MetricBadge label="Clock Skew"    value={`${currentClockSkew} ms`} color={currentClockSkew !== 0 ? 'warning.main' : 'inherit'} />
             </Box>
 
             <Divider sx={{ mb: 0.5 }} />
 
-            {/* Tab bar */}
+            {/* ── Tab bar ── */}
             <Tabs
               value={tab}
               onChange={(_, v) => setTab(v)}
               variant="scrollable"
               scrollButtons="auto"
-              sx={{ minHeight: 32, mb: 0.5 }}
+              sx={{ minHeight: 30, mb: 0.5 }}
               TabIndicatorProps={{ style: { height: 2 } }}
             >
-              <Tab label="Sync Cycle Log"     sx={{ fontSize: '0.72rem', minHeight: 32, py: 0 }} />
-              <Tab label="Run Summary"        sx={{ fontSize: '0.72rem', minHeight: 32, py: 0 }} />
-              <Tab label="Event Log"          sx={{ fontSize: '0.72rem', minHeight: 32, py: 0 }} />
-              <Tab label="Consistency Check"  sx={{ fontSize: '0.72rem', minHeight: 32, py: 0 }} />
+              <Tab label="Sync Cycle Log"     sx={{ fontSize: '0.72rem', minHeight: 30, py: 0 }} />
+              <Tab label="Run Summary"        sx={{ fontSize: '0.72rem', minHeight: 30, py: 0 }} />
+              <Tab label="Event Log"          sx={{ fontSize: '0.72rem', minHeight: 30, py: 0 }} />
+              <Tab label="Consistency Check"  sx={{ fontSize: '0.72rem', minHeight: 30, py: 0 }} />
             </Tabs>
 
-            {/* â”€â”€ Tab 0: Sync Cycle Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+            {/* ── Tab 0: Sync Cycle Log ── */}
             {tab === 0 && (
               <TableContainer sx={{ flex: 1, overflow: 'auto' }}>
                 {cycleLogs.length === 0 ? (
@@ -470,7 +582,7 @@ export default function SyncMonitorPanel({
               </TableContainer>
             )}
 
-            {/* â”€â”€ Tab 1: Run Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+            {/* ── Tab 1: Run Summary ── */}
             {tab === 1 && (
               <TableContainer sx={{ flex: 1, overflow: 'auto' }}>
                 {runLogs.length === 0 ? (
@@ -525,7 +637,7 @@ export default function SyncMonitorPanel({
               </TableContainer>
             )}
 
-            {/* â”€â”€ Tab 2: Event Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+            {/* ── Tab 2: Event Log ── */}
             {tab === 2 && (
               <TableContainer sx={{ flex: 1, overflow: 'auto' }}>
                 {syncEvents.length === 0 ? (
@@ -559,6 +671,12 @@ export default function SyncMonitorPanel({
                               <Chip label="sync_skipped" size="small" color="info" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                             ) : e.event_type === 'schema_drift' ? (
                               <Chip label="schema_drift" size="small" color="warning" variant="filled" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'schema_migrated' ? (
+                              <Chip label="schema_migrated" size="small" color="success" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'user_switched' ? (
+                              <Chip label="user_switched" size="small" color="primary" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ) : e.event_type === 'clock_calibrated' ? (
+                              <Chip label="clock_calibrated" size="small" color="info" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                             ) : e.event_type === 'dlq_retry' ? (
                               <Chip label="dlq_retry" size="small" color="primary" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
                             ) : e.event_type === 'dlq_discard' ? (
@@ -569,7 +687,7 @@ export default function SyncMonitorPanel({
                           </TableCell>
                           <TableCell sx={TD}>{e.task_id ?? '—'}</TableCell>
                           <TableCell sx={{ ...TD, color: SEVERITY_COLORS[e.severity] || 'inherit', fontWeight: e.severity !== 'info' ? 600 : 400 }}>{e.severity}</TableCell>
-                          <TableCell sx={{ ...TD, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.detail}>{e.detail}</TableCell>
+                          <TableCell sx={{ ...TD, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.detail}>{e.detail}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -578,7 +696,7 @@ export default function SyncMonitorPanel({
               </TableContainer>
             )}
 
-            {/* â”€â”€ Tab 3: Consistency Check Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+            {/* ── Tab 3: Consistency Check Log ── */}
             {tab === 3 && (
               <TableContainer sx={{ flex: 1, overflow: 'auto' }}>
                 {consistencyLogs.length === 0 ? (
@@ -617,7 +735,7 @@ export default function SyncMonitorPanel({
 
             {/* ── Clear / Export bar ── */}
             <Divider sx={{ mt: 0.5 }} />
-            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center', py: 0.75 }}>
+            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center', py: 0.5 }}>
               <Button
                 size="small"
                 variant="outlined"
@@ -625,7 +743,7 @@ export default function SyncMonitorPanel({
                 startIcon={<DeleteSweepIcon fontSize="small" />}
                 disabled={TAB_DATA[tab].length === 0}
                 onClick={() => setConfirmClear(true)}
-                sx={{ fontSize: '0.72rem', textTransform: 'none' }}
+                sx={{ fontSize: '0.7rem', textTransform: 'none' }}
               >
                 Clear
               </Button>
@@ -635,11 +753,11 @@ export default function SyncMonitorPanel({
                 startIcon={<FileDownloadIcon fontSize="small" />}
                 disabled={TAB_DATA[tab].length === 0}
                 onClick={() => exportCsv(TAB_DATA[tab], TAB_CONFIG[tab].cols, TAB_CONFIG[tab].filename)}
-                sx={{ fontSize: '0.72rem', textTransform: 'none' }}
+                sx={{ fontSize: '0.7rem', textTransform: 'none' }}
               >
                 Export CSV
               </Button>
-              <Tooltip title="Export all four tables as one Excel workbook (4 sheets)">
+              <Tooltip title="Export all tables as one Excel workbook (4 sheets)">
                 <span>
                   <Button
                     size="small"
@@ -651,7 +769,7 @@ export default function SyncMonitorPanel({
                       TAB_CONFIG.map((cfg, i) => ({ label: cfg.label, rows: TAB_DATA[i], cols: cfg.cols })),
                       'sync_monitor_export.xlsx'
                     )}
-                    sx={{ fontSize: '0.72rem', textTransform: 'none' }}
+                    sx={{ fontSize: '0.7rem', textTransform: 'none' }}
                   >
                     Export Excel
                   </Button>
@@ -659,6 +777,7 @@ export default function SyncMonitorPanel({
               </Tooltip>
             </Box>
 
+            {/* ── Clear Confirmation Dialog ── */}
             <Dialog open={confirmClear} onClose={() => setConfirmClear(false)} maxWidth="xs" fullWidth>
               <DialogTitle sx={{ fontSize: '0.9rem', pb: 1 }}>
                 Clear &quot;{TAB_CONFIG[tab].label}&quot;?
@@ -672,14 +791,14 @@ export default function SyncMonitorPanel({
               </DialogActions>
             </Dialog>
 
-            {/* Prune Cache Dialog */}
+            {/* ── Prune Cache Dialog ── */}
             <Dialog open={pruneDialogOpen} onClose={() => setPruneDialogOpen(false)} maxWidth="xs" fullWidth>
               <DialogTitle sx={{ fontSize: '0.9rem', pb: 1 }}>
                 Prune Local Cache
               </DialogTitle>
               <DialogContent sx={{ pt: 1 }}>
                 <DialogContentText sx={{ fontSize: '0.8rem', mb: 2 }}>
-                  Keep only the newest records in local IndexedDB. Oldest records will be evicted. Records with pending unsynced operations will be preserved.
+                  Keep only the newest records in local IndexedDB. Oldest records will be evicted. Records with pending unsynced operations will be safely preserved.
                 </DialogContentText>
                 <TextField
                   type="number"
@@ -708,7 +827,7 @@ export default function SyncMonitorPanel({
               </DialogActions>
             </Dialog>
 
-            {/* Clear Cache Dialog */}
+            {/* ── Clear Cache Dialog ── */}
             <Dialog open={clearCacheDialogOpen} onClose={() => setClearCacheDialogOpen(false)} maxWidth="xs" fullWidth>
               <DialogTitle sx={{ fontSize: '0.9rem', pb: 1 }}>
                 Clear Local Cache
@@ -733,7 +852,8 @@ export default function SyncMonitorPanel({
                 </Button>
               </DialogActions>
             </Dialog>
-            {/* Dead-Letter Queue (DLQ) Dialog */}
+
+            {/* ── Dead-Letter Queue (DLQ) Dialog ── */}
             <Dialog open={dlqDialogOpen} onClose={() => setDlqDialogOpen(false)} maxWidth="sm" fullWidth>
               <DialogTitle sx={{ fontSize: '0.95rem', pb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
                 <WarningAmberIcon color="warning" fontSize="small" />
@@ -741,7 +861,7 @@ export default function SyncMonitorPanel({
               </DialogTitle>
               <DialogContent sx={{ pt: 1 }}>
                 <DialogContentText sx={{ fontSize: '0.8rem', mb: 1.5 }}>
-                  Operations that encountered permanent non-retryable client errors (e.g. 400, 422, 403) are quarantined here to prevent poison pill loops and repeated backend spam.
+                  Operations that encountered permanent non-retryable client errors (e.g. 400, 422, 403) are quarantined here after exceeding failure thresholds to prevent poison pill loops.
                 </DialogContentText>
                 {dlqLoading ? (
                   <Typography variant="caption" color="text.secondary">Loading DLQ operations...</Typography>
@@ -819,6 +939,105 @@ export default function SyncMonitorPanel({
                 <Button size="small" onClick={() => setDlqDialogOpen(false)}>Close</Button>
               </DialogActions>
             </Dialog>
+
+            {/* ── Clock Skew Simulator Dialog ── */}
+            <Dialog open={clockDialogOpen} onClose={() => setClockDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle sx={{ fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 1 }}>
+                <AccessTimeIcon color="primary" fontSize="small" />
+                Clock Skew Simulator & Calibration
+              </DialogTitle>
+              <DialogContent sx={{ pt: 1 }}>
+                <DialogContentText sx={{ fontSize: '0.8rem', mb: 2 }}>
+                  <code>offline-sync-lite</code> performs passive NTP-lite RTT server time calibration and guarantees monotonic causality even when client physical clocks are skewed into the past or future.
+                </DialogContentText>
+                <TextField
+                  type="number"
+                  size="small"
+                  label="Simulated Clock Offset (ms)"
+                  value={clockSkewInput}
+                  onChange={(e) => setClockSkewInput(parseInt(e.target.value, 10) || 0)}
+                  fullWidth
+                  helperText="Positive = device clock ahead; Negative = device clock behind server"
+                />
+                <Box sx={{ display: 'flex', gap: 0.5, mt: 1.5, flexWrap: 'wrap' }}>
+                  <Button size="small" variant="outlined" onClick={() => setClockSkewInput(-10000)} sx={{ fontSize: '0.68rem' }}>-10s Past</Button>
+                  <Button size="small" variant="outlined" onClick={() => setClockSkewInput(5000)} sx={{ fontSize: '0.68rem' }}>+5s Ahead</Button>
+                  <Button size="small" variant="outlined" onClick={() => setClockSkewInput(60000)} sx={{ fontSize: '0.68rem' }}>+60s Future</Button>
+                  <Button size="small" variant="outlined" onClick={() => setClockSkewInput(0)} sx={{ fontSize: '0.68rem' }}>0 (Reset)</Button>
+                </Box>
+              </DialogContent>
+              <DialogActions>
+                <Button size="small" onClick={() => setClockDialogOpen(false)}>Cancel</Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  onClick={async () => {
+                    setClockDialogOpen(false);
+                    if (setClockOffset) {
+                      await setClockOffset(clockSkewInput);
+                      setCurrentClockSkew(clockSkewInput);
+                    }
+                  }}
+                >
+                  Apply Offset
+                </Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* ── Schema Version & Migration Dialog ── */}
+            <Dialog open={schemaDialogOpen} onClose={() => setSchemaDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle sx={{ fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 1 }}>
+                <DynamicFeedIcon color="primary" fontSize="small" />
+                Schema Versioning & Migrations
+              </DialogTitle>
+              <DialogContent sx={{ pt: 1 }}>
+                <DialogContentText sx={{ fontSize: '0.8rem', mb: 1.5 }}>
+                  Current domain schema: <strong>v{activeSchemaVer}</strong>. Stepwise migrations sequentially transform cached IndexedDB records and queued mutations.
+                </DialogContentText>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="primary"
+                    onClick={async () => {
+                      setSchemaDialogOpen(false);
+                      if (onMigrate) await onMigrate(2);
+                    }}
+                    sx={{ textTransform: 'none', justifyContent: 'flex-start', fontSize: '0.75rem' }}
+                  >
+                    Run Migration to v2 (Ensure tags & points defaults)
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="primary"
+                    onClick={async () => {
+                      setSchemaDialogOpen(false);
+                      if (onMigrate) await onMigrate(3);
+                    }}
+                    sx={{ textTransform: 'none', justifyContent: 'flex-start', fontSize: '0.75rem' }}
+                  >
+                    Run Migration to v3 (Normalize status & assignee)
+                  </Button>
+                  <Divider sx={{ my: 0.5 }} />
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    onClick={async () => {
+                      setSchemaDialogOpen(false);
+                      if (onSimulateSchemaDrift) await onSimulateSchemaDrift(2);
+                    }}
+                    sx={{ textTransform: 'none', justifyContent: 'flex-start', fontSize: '0.75rem' }}
+                  >
+                    Simulate Server Drift (Set Server Schema to v2)
+                  </Button>
+                </Box>
+              </DialogContent>
+              <DialogActions>
+                <Button size="small" onClick={() => setSchemaDialogOpen(false)}>Close</Button>
+              </DialogActions>
+            </Dialog>
           </>
         )}
       </Paper>
@@ -828,11 +1047,11 @@ export default function SyncMonitorPanel({
 
 function MetricBadge({ label, value, color }) {
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 60 }}>
-      <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 55 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1, fontSize: '0.65rem' }}>
         {label}
       </Typography>
-      <Typography variant="body2" fontWeight="bold" sx={{ lineHeight: 1.4, color: color || 'inherit' }}>
+      <Typography variant="body2" fontWeight="bold" sx={{ lineHeight: 1.3, color: color || 'inherit', fontSize: '0.78rem' }}>
         {value}
       </Typography>
     </Box>
