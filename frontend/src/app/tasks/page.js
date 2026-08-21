@@ -19,11 +19,22 @@ export default function TasksPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState('without-library');
+  const [mode, setMode] = useState('with-library');
+  const [userId, setUserId] = useState('alice');
+  const [encrypted, setEncrypted] = useState(false);
+  const [dbName, setDbName] = useState('offline-sync-lite:alice');
+  const [schemaVersion, setSchemaVersion] = useState(1);
 
   useEffect(() => {
     setMode(dataService.getMode());
+    if (dataService.getActiveUserId) {
+      setUserId(dataService.getActiveUserId());
+    }
+    if (dataService.getEncryptionStatus) {
+      setEncrypted(dataService.getEncryptionStatus().encrypted);
+    }
   }, []);
+
   const [syncEvents, setSyncEvents] = useState([]);
   const [cycleLogs, setCycleLogs] = useState([]);
   const [runLogs, setRunLogs] = useState([]);
@@ -41,31 +52,91 @@ export default function TasksPage() {
     setSnackbar((prev) => ({ ...prev, open: false }));
   }
 
-  // Re-subscribe and reload whenever the active adapter changes
+  // Re-subscribe and reload whenever the active adapter or user changes
   useEffect(() => {
     setLoading(true);
-    const unsub = dataService.subscribe(({ records, events, cycleLogs: nextCycleLogs = [], runLogs: nextRunLogs = [], consistencyLogs: nextConsistencyLogs = [], runActive: nextRunActive = false, currentRunId: nextRunId = null }) => {
-      setTasks(records);
-      setSyncEvents(events);
+    const unsub = dataService.subscribe(({
+      records,
+      events,
+      cycleLogs: nextCycleLogs = [],
+      runLogs: nextRunLogs = [],
+      consistencyLogs: nextConsistencyLogs = [],
+      runActive: nextRunActive = false,
+      currentRunId: nextRunId = null,
+      userId: nextUserId = 'alice',
+      dbName: nextDbName = '',
+      schemaVersion: nextSchemaVer = 1,
+      encrypted: nextEncrypted = false,
+    }) => {
+      setTasks(records || []);
+      setSyncEvents(events || []);
       setCycleLogs(nextCycleLogs);
       setRunLogs(nextRunLogs);
       setConsistencyLogs(nextConsistencyLogs);
       setRunActive(nextRunActive);
       setCurrentRunId(nextRunId);
+      if (nextUserId) setUserId(nextUserId);
+      if (nextDbName) setDbName(nextDbName);
+      if (nextSchemaVer) setSchemaVersion(nextSchemaVer);
+      setEncrypted(Boolean(nextEncrypted));
     });
+
     dataService
       .list()
-      .then(() => setLoading(false))
+      .then((records) => {
+        setTasks(records || []);
+        setLoading(false);
+      })
       .catch((err) => {
         showSnackbar(`Failed to load tasks: ${err.message}`, 'error');
         setLoading(false);
       });
+
     return unsub;
   }, [mode]);
 
   function handleModeChange(newMode) {
     dataService.setMode(newMode);
     setMode(newMode);
+    showSnackbar(`Switched mode to: ${newMode === 'with-library' ? 'offline-sync-lite SDK' : 'Direct Fetch Baseline'}`);
+  }
+
+  async function handleUserChange(newUserId, options = {}) {
+    try {
+      setLoading(true);
+      const res = await dataService.switchUser(newUserId, options);
+      setUserId(res.userId || newUserId);
+      showSnackbar(`Switched active tenant to '${newUserId}'`);
+      const records = await dataService.list();
+      setTasks(records || []);
+    } catch (err) {
+      showSnackbar(`User switch failed: ${err.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSetPassphrase(passphrase) {
+    try {
+      const res = await dataService.setEncryptionPassphrase(passphrase);
+      setEncrypted(res.encrypted);
+      showSnackbar(res.encrypted ? 'Vault encryption enabled with AES-GCM-256' : 'At-rest encryption disabled');
+      const records = await dataService.list();
+      setTasks(records || []);
+    } catch (err) {
+      showSnackbar(`Vault update failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function handleSeedDemo() {
+    try {
+      await dataService.seedDemoData();
+      showSnackbar('Demo tasks seeded for Alice & Bob');
+      const records = await dataService.list();
+      setTasks(records || []);
+    } catch (err) {
+      showSnackbar(`Seed failed: ${err.message}`, 'error');
+    }
   }
 
   async function handleDelete(id) {
@@ -146,6 +217,11 @@ export default function TasksPage() {
         onModeChange={handleModeChange}
         onAddTask={() => router.push('/tasks/new')}
         onSyncNow={handleSyncNow}
+        userId={userId}
+        onUserChange={handleUserChange}
+        encrypted={encrypted}
+        onSetPassphrase={handleSetPassphrase}
+        onSeedDemo={handleSeedDemo}
       />
 
       <Box sx={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
@@ -166,11 +242,16 @@ export default function TasksPage() {
             >
               <AddCircleOutlineIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
               <Typography variant="h6" color="text.secondary">
-                No tasks yet — create your first one!
+                No tasks for tenant &quot;{userId}&quot; — create one or seed demo tasks!
               </Typography>
-              <Button variant="contained" onClick={() => router.push('/tasks/new')}>
-                Create Task
-              </Button>
+              <Box sx={{ display: 'flex', gap: 1.5 }}>
+                <Button variant="contained" onClick={() => router.push('/tasks/new')}>
+                  Create Task
+                </Button>
+                <Button variant="outlined" onClick={handleSeedDemo}>
+                  Seed Demo Tasks
+                </Button>
+              </Box>
             </Box>
           ) : (
             <Grid container spacing={2}>
@@ -201,6 +282,15 @@ export default function TasksPage() {
           onRetryDeadLetterOp={handleRetryDeadLetterOp}
           onDiscardDeadLetterOps={handleDiscardDeadLetterOps}
           getClockOffset={dataService.getClockOffset}
+          setClockOffset={dataService.setClockOffset}
+          getSchemaVersion={dataService.getSchemaVersion}
+          onMigrate={dataService.migrate}
+          onTriggerPoisonPill={dataService.triggerPoisonPill}
+          onSimulateSchemaDrift={dataService.simulateSchemaDrift}
+          userId={userId}
+          dbName={dbName}
+          schemaVersion={schemaVersion}
+          encrypted={encrypted}
           getMetrics={dataService.getMetrics}
           syncEvents={syncEvents}
           cycleLogs={cycleLogs}
