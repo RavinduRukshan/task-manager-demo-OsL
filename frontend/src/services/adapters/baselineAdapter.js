@@ -22,6 +22,7 @@ const LS = {
   eventIdCounter:  'bl_eventIdCounter',
   checkIdCounter:  'bl_checkIdCounter',
   repeatCounters:  'bl_repeatCounters',
+  userId:          'bl_userId',
 };
 
 // ─── Internal state ───────────────────────────────────────────────────────────
@@ -32,6 +33,8 @@ let _cycleLogs       = loadLogs(LS.cycleLogs,       []);
 let _runLogs         = loadLogs(LS.runLogs,         []);
 let _consistencyLogs = loadLogs(LS.consistencyLogs, []);
 let _subscribers     = [];
+
+let _userId          = typeof window !== 'undefined' ? (localStorage.getItem(LS.userId) || 'alice') : 'alice';
 
 // Cumulative sync stats (session)
 let _syncSuccessCount  = 0;
@@ -80,6 +83,10 @@ function _notifyAll() {
     consistencyLogs: [..._consistencyLogs],
     runActive:       _runActive,
     currentRunId:    _currentRunId,
+    userId:          _userId,
+    dbName:          `baseline-fetch:${_userId}`,
+    schemaVersion:   1,
+    encrypted:       false,
   };
   for (const fn of _subscribers) {
     try { fn(payload); } catch (_) {}
@@ -130,9 +137,14 @@ function _countAppliedUpdates(prevRecords, nextRecords) {
 async function _api(path, options = {}) {
   _cycleHttpReqCount++;
   if (options.body) _cyclePayloadSentBytes += options.body.length;
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-user-id': _userId,
+    ...(options.headers || {}),
+  };
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   const body = await res.json().catch(() => ({ error: res.statusText }));
   if (!res.ok) {
@@ -148,9 +160,16 @@ async function _api(path, options = {}) {
 
 async function create(task) {
   const { id, ...fields } = task;
+  const taskPayload = {
+    id,
+    ...fields,
+    userId: fields.userId || _userId,
+    tags: Array.isArray(fields.tags) ? fields.tags : [],
+    points: typeof fields.points === 'number' ? fields.points : (parseInt(fields.points, 10) || 0),
+  };
   const record = await _api('/api/tasks', {
     method: 'POST',
-    body: JSON.stringify({ id, ...fields }),
+    body: JSON.stringify(taskPayload),
   });
   _latestRecords = [..._latestRecords, record];
   _userOpsInScenario++;
@@ -198,7 +217,10 @@ async function get(id) {
 async function list() {
   const start = Date.now();
   try {
-    const { records } = await _api('/api/tasks');
+    const url = _userId && _userId !== 'all'
+      ? `/api/tasks?userId=${encodeURIComponent(_userId)}`
+      : '/api/tasks';
+    const { records } = await _api(url);
     const durationMs = Date.now() - start;
     _latestRecords = records || [];
     _syncSuccessCount++;
@@ -230,7 +252,10 @@ async function syncNow(trigger = 'auto') {
   _addEvent({ type: 'sync_start', detail: `Sync triggered (${trigger})` });
 
   try {
-    const { records }    = await _api('/api/tasks');
+    const url = _userId && _userId !== 'all'
+      ? `/api/tasks?userId=${encodeURIComponent(_userId)}`
+      : '/api/tasks';
+    const { records }    = await _api(url);
     const cycleEndTs     = new Date().toISOString();
     const durationMs     = Date.now() - start;
     const onlineAfter    = typeof navigator !== 'undefined' ? navigator.onLine : true;
@@ -248,7 +273,7 @@ async function syncNow(trigger = 'auto') {
     const conflictsInCycle = _conflictsDetected - conflictCountBefore;
     _runRetries += retriesInCycle;
 
-    _addEvent({ type: 'sync_done', detail: `Synced ${_latestRecords.length} records · ${durationMs}ms` });
+    _addEvent({ type: 'sync_done', detail: `Fetched ${_latestRecords.length} records · ${durationMs}ms` });
 
     _addCycleLog({
       cycle_id:         _currentCycleSeq,
@@ -274,7 +299,7 @@ async function syncNow(trigger = 'auto') {
       error_code:       '',
       error_summary:    '',
     });
-
+    _notifyAll();
     return { ok: true, pushedOps: 0, failedOps: 0, appliedUpdates, durationMs };
   } catch (err) {
     const cycleEndTs     = new Date().toISOString();
@@ -284,7 +309,7 @@ async function syncNow(trigger = 'auto') {
     _runSyncFailCount++;
     _retryCount++;
     _runRetries++;
-    const cyclePayloadKB   = Math.round((_cyclePayloadSentBytes / 1024) * 100) / 100;
+    const cyclePayloadKB = Math.round((_cyclePayloadSentBytes / 1024) * 100) / 100;
     _runTotalHttpReqs  += _cycleHttpReqCount;
     _runTotalPayloadKB += cyclePayloadKB;
     const retriesInCycle   = _retryCount - retryCountBefore;
@@ -316,9 +341,23 @@ async function syncNow(trigger = 'auto') {
       error_code:       err.status ? String(err.status) : '',
       error_summary:    err.message || String(err),
     });
-
     return { ok: false, pushedOps: 0, failedOps: 0, appliedUpdates: 0, durationMs };
   }
+}
+
+async function getMetrics() {
+  const total = _syncSuccessCount + _syncFailCount;
+  return {
+    syncSuccessRate: total === 0 ? 0 : Math.round((_syncSuccessCount / total) * 100),
+    avgSyncLatencyMs:
+      _latencySamples.length === 0
+        ? 0
+        : Math.round(_latencySamples.reduce((a, b) => a + b, 0) / _latencySamples.length),
+    retryCount: _retryCount,
+    queuedOpsCount: 0,
+    deadLetteredOpsCount: 0,
+    conflictsDetected: _conflictsDetected,
+  };
 }
 
 // ─── Run lifecycle ────────────────────────────────────────────────────────────
@@ -400,7 +439,6 @@ async function endRun() {
   saveLogs(LS.runLogs, _runLogs);
   _notifyAll();
 
-  // Auto-run consistency check then patch final_consistency
   const consistency = await checkConsistency(savedRunId);
   const allOk = consistency.length > 0 && consistency.every(r => r.is_consistent === 'yes');
   _runLogs = _runLogs.map(r =>
@@ -417,8 +455,15 @@ async function checkConsistency(runId) {
   const checkedTs = new Date().toISOString();
   let serverTasks = [];
   try {
-    const { records } = await _api('/api/tasks');
-    serverTasks = records || [];
+    const url = _userId && _userId !== 'all'
+      ? `${API_BASE_URL}/api/tasks?userId=${encodeURIComponent(_userId)}`
+      : `${API_BASE_URL}/api/tasks`;
+    const res = await fetch(url, {
+      headers: { 'x-user-id': _userId },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    serverTasks = data.records || [];
   } catch (err) {
     _addEvent({ type: 'sync_error', detail: `Consistency check failed: ${err.message}`, severity: 'error' });
     return [];
@@ -439,7 +484,7 @@ async function checkConsistency(runId) {
     if (!local && server) {
       isConsistent   = 'no';
       mismatchType   = 'missing_local';
-      mismatchDetail = `Task ${taskId} exists on server but not in local cache`;
+      mismatchDetail = `Task ${taskId} exists on server but not in local state`;
     } else if (local && !server) {
       isConsistent   = 'no';
       mismatchType   = 'missing_server';
@@ -474,22 +519,6 @@ async function checkConsistency(runId) {
   return rows;
 }
 
-// ─── Metrics ──────────────────────────────────────────────────────────────────
-
-async function getMetrics() {
-  const total = _syncSuccessCount + _syncFailCount;
-  return {
-    syncSuccessRate: total === 0 ? 0 : Math.round((_syncSuccessCount / total) * 100),
-    avgSyncLatencyMs:
-      _latencySamples.length === 0
-        ? 0
-        : Math.round(_latencySamples.reduce((a, b) => a + b, 0) / _latencySamples.length),
-    retryCount: _retryCount,
-    queuedOpsCount: 0,    // no offline queue in baseline mode
-    conflictsDetected: _conflictsDetected,
-  };
-}
-
 // ─── Pub/sub ──────────────────────────────────────────────────────────────────
 
 function subscribe(fn) {
@@ -502,6 +531,10 @@ function subscribe(fn) {
     consistencyLogs: [..._consistencyLogs],
     runActive:       _runActive,
     currentRunId:    _currentRunId,
+    userId:          _userId,
+    dbName:          `baseline-fetch:${_userId}`,
+    schemaVersion:   1,
+    encrypted:       false,
   });
   return function unsubscribe() {
     _subscribers = _subscribers.filter(s => s !== fn);
@@ -514,14 +547,14 @@ function startAutoSync(intervalMs = 15000) {
   if (_autoSyncHandle) return;
   _paused = false;
   _autoSyncHandle = setInterval(() => syncNow('auto'), intervalMs);
-  _addEvent({ type: 'auto_sync_start', detail: `Auto-sync started (every ${intervalMs / 1000}s)` });
+  _addEvent({ type: 'auto_sync_start', detail: `Auto-poll started (every ${intervalMs / 1000}s)` });
 }
 
 function stopAutoSync() {
   if (_autoSyncHandle) {
     clearInterval(_autoSyncHandle);
     _autoSyncHandle = null;
-    _addEvent({ type: 'auto_sync_stop', detail: 'Auto-sync stopped' });
+    _addEvent({ type: 'auto_sync_stop', detail: 'Auto-poll stopped' });
   }
 }
 
@@ -556,11 +589,13 @@ function clearLogs(target) {
   _notifyAll();
 }
 
-async function pruneCache(maxRecords = 50) {
+async function pruneCache() {
   return { pruned: 0, kept: _latestRecords.length };
 }
 
 async function clearCache() {
+  _latestRecords = [];
+  _notifyAll();
   return { ok: true };
 }
 
@@ -576,8 +611,156 @@ async function discardDeadLetterOps() {
   return { discarded: 0 };
 }
 
+// ─── Multi-User & Tenant Management ──────────────────────────────────────────
+
+async function switchUser(newUserId) {
+  _userId = newUserId || 'default';
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(LS.userId, _userId);
+  }
+  await list().catch(() => {});
+  _addEvent({
+    type: 'user_switched',
+    detail: `Switched active baseline user to '${_userId}'`,
+    severity: 'info',
+  });
+  _notifyAll();
+  return { userId: _userId, dbName: `baseline-fetch:${_userId}` };
+}
+
+async function logout() {
+  _latestRecords = [];
+  _addEvent({
+    type: 'logout',
+    detail: `Logged out user '${_userId}' in baseline mode`,
+    severity: 'info',
+  });
+  _notifyAll();
+}
+
+async function purge() {
+  _latestRecords = [];
+  _addEvent({
+    type: 'purged',
+    detail: `Cleared state for user '${_userId}' in baseline mode`,
+    severity: 'warn',
+  });
+  _notifyAll();
+}
+
+// ─── Encryption / Vault Stubs ────────────────────────────────────────────────
+
+async function setEncryptionPassphrase() {
+  _addEvent({
+    type: 'encryption_change',
+    detail: 'Encryption not supported in baseline mode (requires offline-sync-lite)',
+    severity: 'warn',
+  });
+  return { encrypted: false, supported: false };
+}
+
+function getEncryptionStatus() {
+  return {
+    encrypted: false,
+    passphraseSet: false,
+    algorithm: 'None (Direct Fetch)',
+  };
+}
+
+// ─── Clock Skew Stubs ────────────────────────────────────────────────────────
+
 function getClockOffset() {
   return 0;
+}
+
+async function setClockOffset() {
+  _addEvent({
+    type: 'clock_calibrated',
+    detail: 'Clock calibration not supported in baseline mode',
+    severity: 'warn',
+  });
+}
+
+// ─── Schema Stubs ─────────────────────────────────────────────────────────────
+
+async function getSchemaVersion() {
+  return 1;
+}
+
+async function migrate() {
+  _addEvent({
+    type: 'schema_migrated',
+    detail: 'Schema migrations not supported in baseline mode',
+    severity: 'warn',
+  });
+  return { migrated: false };
+}
+
+function getActiveUserId() {
+  return _userId;
+}
+
+function getDbName() {
+  return `baseline-fetch:${_userId}`;
+}
+
+// ─── Demo & Simulation Helpers ────────────────────────────────────────────────
+
+async function seedDemoData() {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/tasks/config/seed`, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await syncNow('seed');
+    _addEvent({ type: 'seed', detail: 'Demo data seeded', severity: 'info' });
+    return { ok: true };
+  } catch (err) {
+    _addEvent({ type: 'sync_error', detail: `Seed failed: ${err.message}`, severity: 'error' });
+    throw err;
+  }
+}
+
+async function triggerPoisonPill(title = '__POISON_PILL__') {
+  const id = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `poison-${Date.now()}`;
+  const poisonTask = {
+    id,
+    title,
+    description: 'Test non-retryable 422 error',
+    status: 'open',
+    priority: 'high',
+    assignee: _userId,
+    tags: ['poison-pill'],
+    poisonPill: true,
+  };
+  _userOpsInScenario++;
+  try {
+    await create(poisonTask);
+  } catch (err) {
+    _addEvent({
+      type: 'op_failed',
+      detail: `Direct create failed immediately with 422 (baseline has no DLQ queue protection): ${err.message}`,
+      task_id: id,
+      severity: 'error',
+    });
+  }
+}
+
+async function simulateSchemaDrift(targetVersion = 2) {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/tasks/config/schema-version`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schemaVersion: targetVersion }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _addEvent({
+      type: 'schema_drift_simulated',
+      detail: `Server schema version set to v${targetVersion}. Baseline mode ignores schema drift.`,
+      severity: 'info',
+    });
+    await syncNow('drift_test');
+  } catch (err) {
+    _addEvent({ type: 'sync_error', detail: `Drift simulation failed: ${err.message}`, severity: 'error' });
+  }
 }
 
 // ─── Export ───────────────────────────────────────────────────────────────────
@@ -605,7 +788,20 @@ const baselineAdapter = {
   getDeadLetterOps,
   retryDeadLetterOp,
   discardDeadLetterOps,
+  switchUser,
+  logout,
+  purge,
+  setEncryptionPassphrase,
+  getEncryptionStatus,
   getClockOffset,
+  setClockOffset,
+  getSchemaVersion,
+  migrate,
+  getActiveUserId,
+  getDbName,
+  seedDemoData,
+  triggerPoisonPill,
+  simulateSchemaDrift,
 };
 
 export default baselineAdapter;
