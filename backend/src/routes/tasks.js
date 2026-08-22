@@ -139,6 +139,7 @@ router.post('/batch', async (req, res) => {
       if (op.type === 'create') {
         const { id, payload } = op;
         const src = payload.data || payload;
+        const effectiveId = id || src.id || payload.id;
         const {
           title,
           description = '',
@@ -161,7 +162,7 @@ router.post('/batch', async (req, res) => {
           continue;
         }
 
-        if (!id || !title) {
+        if (!effectiveId || !title) {
           results.push({ success: false, status: 400, error: 'id and title are required' });
           continue;
         }
@@ -173,7 +174,7 @@ router.post('/batch', async (req, res) => {
           `INSERT INTO tasks (id, title, description, status, priority, assignee, tags, points, user_id, updated_at, server_version)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 1)
            RETURNING *`,
-          [id, title, description, status, priority, assignee, cleanTags, cleanPoints, userId]
+          [effectiveId, title, description, status, priority, assignee, cleanTags, cleanPoints, userId]
         );
         results.push({ success: true, record: formatTask(result.rows[0]) });
 
@@ -288,8 +289,8 @@ router.get('/:id', async (req, res) => {
 // ─── POST /api/tasks ──────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
-    const { id } = req.body;
     const src = req.body.data || req.body;
+    const id = req.body.id || src.id;
     const {
       title,
       description = '',
