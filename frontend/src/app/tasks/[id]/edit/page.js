@@ -65,13 +65,17 @@ export default function EditTaskPage() {
       </Typography>
 
       <Paper sx={{ p: 3, mt: 2 }}>
-        {task ? (
+        {task?.data ? (
           <TaskForm
             initialValues={task.data}
             onSubmit={handleSubmit}
             onCancel={() => router.push('/tasks')}
             submitLabel="Update Task"
           />
+        ) : task ? (
+          <Alert severity="warning">
+            This task is encrypted at rest. Please enter your Vault passphrase in the top bar to edit it.
+          </Alert>
         ) : (
           <Alert severity="error">Task not found.</Alert>
         )}
